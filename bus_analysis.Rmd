@@ -1,0 +1,638 @@
+---
+title: "Abu Dhabi School Bus Project"
+author: "Hayk Stepanyan"
+output: 
+  html_document:
+    embed-resources: true
+    toc: true
+    toc_float: true
+---
+
+---
+
+# Part 0: Setup and Introduction
+
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width  = 8, fig.height = 6)
+```
+
+```{r, include = FALSE}
+library(tidyverse)
+library(tidymodels)
+library(randomForest)
+library(caret)
+library(knitr)
+library(scales)
+```
+
+This report analyzes and predicts the probability of a child using the school bus two or more days per week. Thus, the variable is defined as uses_bus and is set to 1 if the parent's answer in the survey was 2-3 days per week or 4+ days per week and to 0 otherwise.
+
+First of all, we need to store our dataset using read_csv(). A crucial step for working with a decision tree later is required here which is labeling the uses_bus outputs. I will explain this in Part 3: Random Forest Model.
+```{r}
+
+df <- read_csv("bus_analysis.csv")
+df$uses_bus <- factor(df$uses_bus, levels= c(0, 1), labels = c("no", "yes"))
+
+# Use glimpse(df) to find general information about our data.
+glimpse(df)
+```
+
+---
+
+# Part 1: Exploratory Data Analysis
+
+Before we build any models, we explore the dataset to understand patterns. Using glimpse(df), we find that the dataset contains 4014 rows and 96 columns. 
+
+Many of these variables were collected for administrative or different purposes and are not directly correlated with our target variable. One of the most important steps in data analysis is choosing the correct variables that have an impact on our studies. Therefore, multiple columns are not going to be used, such as collector, survey timestamps, elec_car and others. 
+
+Hence, we focus on variables that are more likely to be associated with bus usage. For example the driving distance from home to school is expected to be a major predictor.
+
+## Target Variable Balance check
+
+```{r}
+
+target_counts <- count(df, uses_bus)
+target_counts$pct <- target_counts$n / sum(target_counts$n)
+kable(
+  target_counts,
+  col.names = c("Uses Bus Frequently", "Count", "Proportion"),
+  digits = 3,
+  caption = "Distribution of the target variable uses_bus"
+)
+```
+
+We do this step in order to see if there is a big imbalance in our target variable. If 95% of uses_bus was 1, the model might always predict "yes" and still be 95% accurate, without learning, which could result in completely wrong answers in the test dataset. 
+
+It is beneficial for us that the proportions are roughly 60% / 40% as we do not have to use any special balancing techniques and can move forward.
+
+---
+
+## Univariate Analysis
+
+### Plot 1: Distribution of Driving Distance from Home to School
+
+```{r}
+
+dist_data <- filter(df, !is.na(dist_home_school))
+dist_data$dist_home_school <- factor(dist_data$dist_home_school)
+dist_counts <- count(dist_data, dist_home_school)
+dist_counts$pct <- dist_counts$n / sum(dist_counts$n)
+
+distance_labels <- c(
+  "1" = "<5 min",
+  "2" = "5-10 min",
+  "3" = "10-15 min",
+  "4" = "15-20 min",
+  "5" = "20-25 min",
+  "6" = "25-30 min",
+  "7" = ">30 min"
+)
+
+plot1 <- ggplot(dist_counts, aes(x = dist_home_school, y = pct, fill = dist_home_school))
+plot1 <- plot1 + geom_col(width = 0.7, show.legend = FALSE)
+plot1 <- plot1 + geom_text(
+  aes(label = percent(pct, accuracy = 0.1)),
+  vjust = -0.4,
+  size = 3.5,
+  fontface = "bold"
+)
+plot1 <- plot1 + scale_x_discrete(labels = distance_labels)
+plot1 <- plot1 + scale_y_continuous(
+  labels = percent_format(),
+  expand = expansion(mult = c(0, 0.1))
+)
+plot1 <- plot1 + scale_fill_brewer(palette = "Blues")
+plot1 <- plot1 + labs(
+  title = "Distribution of Driving Distance from Home to School",
+  x = "Driving Distance Category",
+  y = "Proportion of Respondents"
+)
+plot1 <- plot1 + theme_minimal(base_size = 13)
+plot1 <- plot1 + theme(
+  plot.title = element_text(face = "bold"),
+  plot.subtitle = element_text(color = "grey50"),
+  panel.grid.major.x = element_blank()
+)
+
+print(plot1)
+```
+
+**Interpretation:** The distribution of home to school distances is close to what we would intuitively assume. The most families using buses are the ones that live more than 30 minutes away, which might be caused by parent's not being able to drive their children for that long every day. Similarly very few families living less than 5 minutes away prefer to use buses, as children can walk or use bicycles / scooters to get to school. 
+
+---
+
+### Plot 2: Distribution of Curriculum Type
+
+```{r}
+
+curr_data <- filter(df, !is.na(curriculum_grp))
+curr_counts <- count(curr_data, curriculum_grp)
+curr_counts$pct <- curr_counts$n / sum(curr_counts$n)
+curr_counts$curriculum_grp <- reorder(curr_counts$curriculum_grp, curr_counts$n)
+
+
+plot2 <- ggplot(curr_counts, aes(x = curriculum_grp, y = pct, fill = curriculum_grp))
+plot2 <- plot2 + geom_col(width = 0.65, show.legend = FALSE)
+plot2 <- plot2 + geom_text(
+  aes(label = paste0(comma(n), " (", percent(pct, accuracy = 0.1), ")")),
+  hjust = -0.1,
+  size = 3.3
+)
+
+plot2 <- plot2 + scale_y_continuous(
+  labels = percent_format(),
+  expand = expansion(mult = c(0, 0.25))
+)
+plot2 <- plot2 + scale_fill_brewer(palette = "Blues")
+plot2 <- plot2 + coord_flip()
+plot2 <- plot2 + labs(
+  title = "Distribution of School Curriculum Type",
+  x = "Curriculum Group",
+  y = "Proportion of Respondents"
+)
+
+plot2 <- plot2 + theme_minimal(base_size = 13)
+plot2 <- plot2 + theme(
+  plot.title = element_text(face = "bold"),
+  plot.subtitle = element_text(color = "grey50"),
+  panel.grid.major.y = element_blank()
+)
+print(plot2)
+```
+
+**Interpretation:** Indian CBSE and British curriculum schools account for roughly 70% of the respondents. Based on this we can assume that students in Indian and British schools may use the bus more frequently. This might be cause by differences in residential patterns, household preferences, or being more familiar with the school bus systems.  
+
+---
+
+## Bivariate Analysis
+
+### Plot 3: Bus Usage Rate by Driving Distance
+
+```{r}
+dist_bus_data <- filter(df, !is.na(dist_home_school))
+dist_bus_data$dist_home_school <- factor(dist_bus_data$dist_home_school)
+distance_categories <- unique(dist_bus_data$dist_home_school)
+pct_bus_values <- tapply(dist_bus_data$uses_bus == "yes", dist_bus_data$dist_home_school, mean)
+n_values <- tapply(dist_bus_data$uses_bus, dist_bus_data$dist_home_school, length)
+dist_bus_summary <- data.frame(
+  dist_home_school = names(pct_bus_values),
+  pct_bus = as.numeric(pct_bus_values),
+  n = as.numeric(n_values)
+)
+dist_bus_summary$dist_home_school <- factor(dist_bus_summary$dist_home_school)
+
+
+plot3 <- ggplot(dist_bus_summary, aes(x = dist_home_school, y = pct_bus, group = 1))
+plot3 <- plot3 + geom_line(color = "#2196F3", linewidth = 1.2)
+plot3 <- plot3 + geom_point(aes(size = n), color = "#2196F3", alpha = 0.8)
+plot3 <- plot3 + geom_text(
+  aes(label = percent(pct_bus, accuracy = 1)),
+  vjust = -1.2,
+  size = 3.5,
+  fontface = "bold",
+  color = "#1565C0"
+)
+plot3 <- plot3 + scale_x_discrete(labels = distance_labels)
+plot3 <- plot3 + scale_y_continuous(
+  labels = percent_format(),
+  limits = c(0, 1),
+  expand = expansion(mult = c(0.02, 0.1))
+)
+plot3 <- plot3 + scale_size_continuous(name = "Number of Respondents", range = c(3, 10))
+plot3 <- plot3 + labs(
+  title = "Bus Usage Rate Increases Sharply with Distance from School",
+  x = "Driving Distance from Home to School",
+  y = "Proportion Using Bus Frequently"
+)
+plot3 <- plot3 + theme_minimal(base_size = 13)
+plot3 <- plot3 + theme(
+  plot.title = element_text(face = "bold"),
+  plot.subtitle = element_text(color = "grey50"),
+  panel.grid.minor = element_blank()
+)
+print(plot3)
+```
+
+**Interpretation:** The relationship between distance and bus usage is very clear. At less than 5 minutes from school, only few families use the bus frequently. On the other hand, almost 90% of families living more than 30 minutes away use prefer to use the bus frequently.  
+
+---
+
+### Plot 4: Bus Usage Rate by Curriculum Type and Number of Cars
+
+```{r}
+curr_cars_data <- filter(df, !is.na(curriculum_grp), !is.na(n_cars))
+# In the survey: 1 = 0 cars, 2 = 1 car, 3 = 2 cars, 4 = 3+ cars
+curr_cars_data$n_cars_label <- case_when(
+  curr_cars_data$n_cars == 1 ~ "0 cars",
+  curr_cars_data$n_cars == 2 ~ "1 car",
+  curr_cars_data$n_cars == 3 ~ "2 cars",
+  curr_cars_data$n_cars == 4 ~ "3+ cars"
+)
+curr_cars_data$n_cars_label <- factor(
+  curr_cars_data$n_cars_label,
+  levels = c("0 cars", "1 car", "2 cars", "3+ cars")
+)
+pct_bus_grouped <- tapply(
+  curr_cars_data$uses_bus == "yes",
+  interaction(curr_cars_data$curriculum_grp, curr_cars_data$n_cars_label),
+  mean
+)
+n_grouped <- tapply(
+  curr_cars_data$uses_bus,
+  interaction(curr_cars_data$curriculum_grp, curr_cars_data$n_cars_label),
+  length
+)
+curr_cars_summary <- data.frame(
+  group = names(pct_bus_grouped),
+  pct_bus = as.numeric(pct_bus_grouped),
+  n = as.numeric(n_grouped)
+)
+curr_cars_summary$curriculum_grp <- sapply(
+  strsplit(curr_cars_summary$group, "\\."),
+  function(x) x[1]
+)
+curr_cars_summary$n_cars_label <- sapply(
+  strsplit(curr_cars_summary$group, "\\."),
+  function(x) x[2]
+)
+curr_cars_summary$n_cars_label <- factor(
+  curr_cars_summary$n_cars_label,
+  levels = c("0 cars", "1 car", "2 cars", "3+ cars")
+)
+plot4 <- ggplot(
+  curr_cars_summary,
+  aes(x = n_cars_label, y = pct_bus, fill = curriculum_grp)
+)
+plot4 <- plot4 + geom_col(position = "dodge", width = 0.7)
+plot4 <- plot4 + geom_text(
+  aes(label = percent(pct_bus, accuracy = 1)),
+  position = position_dodge(width = 0.7),
+  vjust = -0.4,
+  size = 2.8
+)
+plot4 <- plot4 + scale_y_continuous(
+  labels = percent_format(),
+  expand = expansion(mult = c(0, 0.12))
+)
+plot4 <- plot4 + scale_fill_brewer(palette = "Set2", name = "Curriculum")
+plot4 <- plot4 + labs(
+  title = "Bus Usage Rate by Curriculum and Number of Household Cars",
+  x = "Number of Cars in Household",
+  y = "Proportion Using Bus Frequently"
+)
+plot4 <- plot4 + theme_minimal(base_size = 12)
+plot4 <- plot4 + theme(
+  plot.title = element_text(face = "bold"),
+  plot.subtitle = element_text(color = "grey50"),
+  legend.position = "bottom",
+  panel.grid.major.x = element_blank()
+)
+
+print(plot4)
+```
+
+**Interpretation:** First of all, we notice that Indian CBSE families have very high bus usage overall. Even with 3+ cars two thirds of families use bus services frequently, whereas the families with 3+ cars in other curriculums use the busses only one third of the time. However, all of the curriculums follow the same pattern, less bus usage with the more cars available in the household. 
+
+---
+
+## Missing Data Analysis
+
+```{r}
+vars_of_interest <- c(
+  "dist_home_school", "n_cars", "income_imp_num", "curriculum_grp",
+  "mother_license", "father_license", "neigh_group", "child_age",
+  "bus_stop", "bus_rely", "hous_type", "car_cost", "car_time", "bus_cost",
+  "father_job", "mother_job"
+)
+selected_cols <- df[, vars_of_interest]
+missing_counts <- colSums(is.na(selected_cols))
+missing_pct <- missing_counts / nrow(df)
+missing_table <- data.frame(
+  Variable = names(missing_counts),
+  Missing_Count = as.integer(missing_counts),
+  Missing_Pct = missing_pct
+)
+missing_table <- missing_table[order(-missing_table$Missing_Count), ]
+kable(
+  missing_table,
+  row.names = FALSE,
+  digits = 3,
+  col.names = c("Variable", "Missing Count", "Missing %")
+)
+```
+
+**Imputation strategy:** Rather than dropping incomplete rows (which would reduce sample size and risk biasing results toward fully-responding families), we impute every predictor we plan to use:
+
+- **Numeric variables** (`child_age`, `bus_stop`, `bus_rely`, `car_cost`, `car_time`, `bus_cost`, `income_imp_num`): impute with the **median**. The median is robust to outliers and preserves the central tendency of the variable.
+
+- **Categorical variables** (`dist_home_school`, `n_cars`, `mother_license`, `father_license`, `hous_type`, `father_job`, `mother_job`): impute with the **mode** (most frequent category). This keeps the variable on its original scale without inventing a new "Unknown" level that would have no real-world meaning to the model.
+
+The largest missingness in our predictors is `father_job` at ~4.6% and `child_age` at ~3.9%, so the imputation only touches a small minority of rows.
+
+---
+
+# Part 2: Basic Logistic Regression Model
+
+## Variable Selection and Justification
+
+1. **`dist_home_school`** — Our EDA showed a monotonic relationship. Bus usage rises from 15% at <5 min to 88% at at >30 min. This variable in my opinion is the strongest predictor.
+
+2. **`n_cars`** — More cars means more flexibility to drive children, hence less need for the bus. Families with 0–1 cars showed around 78% bus usage against the 32% for 3+ car households.
+
+3. **`curriculum_grp`** — Indian CBSE schools showed around 87% bus usage against the 39% for MoE UAE. This likely reflects both the geographic location of these schools and cultural/community norms around school transport.
+
+4. **`mother_license`** — Mothers without a driving license can not drive children to school, making the bus the obvious option. The reason I chose mother_license instead of father_license is because I assumed fathers are more likely to be at work during that time, and mothers would be more inclined to drive the children. Also father_license had more missing values. The reason I did not include both of them is because I tried, and got the same accuracy.
+
+5. **`dist_home_school:n_cars`** We include this because the effect of distance may vary based on how many cars a family has. A family 30 minutes away with 3 cars might still drive, while a family 30 minutes away with 0 cars almost certainly uses the bus.
+
+6. **`income_imp_num`** — Higher income families may prefer the car for convenience, while lower income families may use the bus to save on costs.
+
+7. **`hous_type`** — Apartments tend to cluster in denser urban areas closer to schools while villas are often in suburbs farther out.
+
+## Data Preparation
+
+We impute missing values (rather than calling `na.omit()`, which would drop ~10% of the data and risk introducing selection bias) and convert all categorical predictors into factors so the models treat them correctly.
+
+```{r}
+model_data <- df[, c(
+  "uses_bus", "dist_home_school", "n_cars", "curriculum_grp",
+  "mother_license", "income_imp_num", "hous_type", "child_age",
+  "neigh_group", "bus_stop", "bus_rely", "father_license", "car_cost",
+  "car_time", "bus_cost", "father_job", "mother_job"
+)]
+
+# --- Numeric imputation with the median ---
+num_vars <- c("child_age", "bus_stop", "bus_rely", "car_cost", "car_time", "bus_cost", "income_imp_num")
+for (v in num_vars) {
+  med <- median(model_data[[v]], na.rm = TRUE)
+  model_data[[v]] <- ifelse(is.na(model_data[[v]]), med, model_data[[v]])
+}
+
+# --- Categorical imputation with the mode, then factor conversion ---
+cat_vars <- c("dist_home_school", "n_cars", "mother_license", "father_license",
+              "hous_type", "father_job", "mother_job", "curriculum_grp", "neigh_group")
+
+get_mode <- function(x) {
+  ux <- unique(x[!is.na(x)])
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+for (v in cat_vars) {
+  m <- get_mode(model_data[[v]])
+  model_data[[v]][is.na(model_data[[v]])] <- m
+  model_data[[v]] <- factor(model_data[[v]])
+}
+
+cat("Rows after imputation:", nrow(model_data), "\n")
+cat("Total NAs left:", sum(is.na(model_data)), "\n")
+print(table(model_data$uses_bus))
+```
+
+## Train / Test Split
+
+To honestly compare the two models, we split the data into 80% training and 20% test before fitting anything. Both models are fit only on the training set and evaluated only on the held-out test set, so the accuracies we report are estimates of how the model would perform on new, unseen families. We stratify the split by `uses_bus` so that the train and test sets have the same class balance as the full data.
+
+```{r}
+set.seed(06052005)
+split <- initial_split(model_data, prop = 0.8, strata = uses_bus)
+train_data <- training(split)
+test_data  <- testing(split)
+
+cat("Train rows:", nrow(train_data), "\n")
+cat("Test rows: ", nrow(test_data), "\n")
+cat("Train class balance:\n"); print(prop.table(table(train_data$uses_bus)))
+cat("Test class balance:\n");  print(prop.table(table(test_data$uses_bus)))
+```
+
+## Fit the Logistic Regression Model
+
+```{r}
+logit_model <- glm(
+  uses_bus ~ dist_home_school + n_cars + curriculum_grp + mother_license + income_imp_num + hous_type + dist_home_school:n_cars,
+  data = train_data,
+  family = binomial(link = "logit")
+)
+summary(logit_model)
+```
+
+
+## Model Summary Interpretation
+
+```{r}
+odds_ratios <- exp(coef(logit_model))
+conf_int <- exp(confint(logit_model))
+p_values <- summary(logit_model)$coefficients[, 4]
+results_table <- data.frame(
+  Term = names(odds_ratios),
+  OddsRatio = round(odds_ratios, 3),
+  CI_low = round(conf_int[, 1], 3),
+  CI_high = round(conf_int[, 2], 3),
+  pvalue = round(p_values, 4),
+  Significant = ifelse(p_values < 0.05, "Yes", "No")
+)
+results_table <- results_table[order(results_table$pvalue), ]
+kable(
+  results_table,
+  row.names = FALSE,
+)
+```
+
+**Interpretation of key results:**
+
+The logistic regression models the **log-odds** of `uses_bus = yes`. After applying the exponential function, we get odds ratios. An odds ratio > 1 means the predictor increases the odds of frequent bus use while < 1 means it decreases them.
+
+**Two statistically significant predictors:**
+
+1. **`dist_home_school7` (> 30 min driving distance):** This has the largest positive coefficient in the model. Meaning a family living more than 30 minutes from school has much higher odds of the child using the bus frequently compared to a family living less than 5 minutes away. This makes perfect sense as a 30-minute daily drive each way adds up to 2 hours.
+
+2. **`curriculum_grpIndian_CBSE`:** Holding all other variables constant, children attending Indian CBSE schools have much higher odds of frequent bus use compared to American curriculum schools (the reference level in R is alphabetical). This reflects both the geographic placement of Indian schools and strong cultural community standards around organized school transport in Indian households.
+
+## Confusion Matrix and Accuracy (on the held-out test set)
+
+```{r}
+logit_probs <- predict(logit_model, newdata = test_data, type = "response")
+logit_pred <- ifelse(logit_probs >= 0.5, "yes", "no")
+logit_pred <- factor(logit_pred, levels = c("no", "yes"))
+cm_logit <- confusionMatrix(logit_pred, test_data$uses_bus, positive = "yes")
+print(cm_logit)
+```
+
+```{r}
+metrics_table <- data.frame(
+  Metric = c("Accuracy", "Sensitivity", "Specificity", "Precision", "Kappa"),
+  Value = c(
+    cm_logit$overall["Accuracy"],
+    cm_logit$byClass["Sensitivity"],
+    cm_logit$byClass["Specificity"],
+    cm_logit$byClass["Precision"],
+    cm_logit$overall["Kappa"]
+  )
+)
+metrics_table$Value <- round(metrics_table$Value, 3)
+kable(metrics_table, row.names = FALSE)
+```
+
+**Interpretation:** From the confusion matrix we can interpret how well the model performed on data it has never seen before. The accuracy is reasonable, but logistic regression assumes linearity in the log-odds and cannot capture more complex patterns. We aim to beat it in Part 3.
+
+---
+
+# Part 3: Random Forest Model
+
+## Why Random Forest?
+
+Logistic regression is a strong model, but it makes restrictive assumptions. It assumes a linear relationship between predictors and the log-odds of the outcome, and cannot automatically capture interactions or non-linear patterns.
+
+A **Random Forest** works differently. It builds many decision trees, each trained on a random subset of the data and a random subset of predictors. The final prediction is the average probability across all trees. This approach:
+
+- **Handles non-linear relationships** automatically (distance may have a threshold effect, not a smooth linear one)
+- **Captures interactions** between variables (e.g., Indian curriculum × far distance)
+- **Is robust to outliers and missing patterns** because outliers usually end up in a leaf away from the main data and do not affect the decisions that much.
+- **Gives variable importance scores** that tell us which predictors matter most
+- **Almost always outperforms logistic regression** on real-world data
+
+## Fit the Random Forest
+
+Note that all categorical predictors — including `father_job` and `mother_job`, which are stored as numeric codes in the raw data — were converted to factors in the data preparation step above. This is essential: without factoring, the Random Forest would treat them as continuous variables and search for numeric split points like `father_job < 2.5`, which is meaningless for unordered job categories.
+
+```{r}
+set.seed(06052005)
+rf_model <- randomForest(
+  uses_bus ~ dist_home_school + n_cars + curriculum_grp + mother_license + income_imp_num + hous_type + child_age + neigh_group + bus_stop + bus_rely + father_license + car_cost + car_time + bus_cost + father_job + mother_job,
+  data = train_data,
+  ntree = 500,
+  mtry = 4,
+  importance = TRUE,   
+  keep.forest = TRUE   
+)
+print(rf_model)
+```
+
+## Variable Importance
+
+```{r}
+importance_raw <- importance(rf_model)
+importance_df <- data.frame(
+  Variable = rownames(importance_raw),
+  MeanDecreaseAccuracy = importance_raw[, "MeanDecreaseAccuracy"],
+  MeanDecreaseGini = importance_raw[, "MeanDecreaseGini"]
+)
+importance_df <- importance_df[order(-importance_df$MeanDecreaseAccuracy), ]
+
+kable(
+  importance_df,
+  row.names = FALSE,
+  digits = 3,
+)
+```
+
+As mentioned before using the random forest has multiple advantages. One of which is the ability to identify the importance of a variable. We do this by using **MeanDecreaseAccuracy** which works the following way. It takes the variable and shuffles its values across all the rows without changing anything else in the data. Which means that after doing the same operations we will be able to see a difference in accuracy, as if living more than 30 minutes away gets replaced by living only 5 minutes away the prediction is going to lean towards not using the bus instead of using it. Hence the more it affects the accuracy the more important the variable was. The higher the score the more important the variable is. 
+
+Another variable on the table is **MeanDecreaseGini**, it measures how much each variable reduces the Giny impurity across all splits of trees. Giny purity is how strong the decision is in the tree between two choices. Pure means one choice is mostly a "yes" prediction and the other is mostly a "no" prediction. For example dist_home_school variable, when considering families living 5 minutes away and more than 30 minutes away the two groups are very pure, as one of the groups mostly uses buses, and the other does not. The higher the score the more pure the split is.
+
+
+```{r}
+importance_df$Variable <- reorder(importance_df$Variable, importance_df$MeanDecreaseAccuracy)
+imp_plot <- ggplot(
+  importance_df,
+  aes(x = Variable, y = MeanDecreaseAccuracy, fill = MeanDecreaseAccuracy)
+)
+imp_plot <- imp_plot + geom_col(width = 0.65, show.legend = FALSE)
+imp_plot <- imp_plot + geom_text(
+  aes(label = round(MeanDecreaseAccuracy, 1)),
+  hjust = -0.2,
+  size = 3.5
+)
+imp_plot <- imp_plot + scale_fill_gradient(low = "#90CAF9", high = "#1565C0")
+imp_plot <- imp_plot + scale_y_continuous(expand = expansion(mult = c(0, 0.2)))
+imp_plot <- imp_plot + coord_flip()
+imp_plot <- imp_plot + labs(
+  title = "Variable Importance: Random Forest",
+  x = NULL,
+  y = "Mean Decrease in Accuracy",
+)
+imp_plot <- imp_plot + theme_minimal(base_size = 13)
+imp_plot <- imp_plot + theme(
+  plot.title = element_text(face = "bold"),
+  plot.subtitle = element_text(color = "grey50"),
+  panel.grid.major.y = element_blank()
+)
+print(imp_plot)
+```
+
+## Random Forest Performance (on the held-out test set)
+
+```{r}
+rf_pred <- predict(rf_model, newdata = test_data, type = "response")
+rf_probs <- predict(rf_model, newdata = test_data, type = "prob")[, "yes"]
+cm_rf <- confusionMatrix(rf_pred, test_data$uses_bus, positive = "yes")
+print(cm_rf)
+```
+
+## Model Comparison
+
+Both models are evaluated on the same 20% held-out test set, so this comparison is fair and reflects expected real-world performance on new families.
+
+```{r}
+comparison_table <- data.frame(
+  Model = c("Logistic Regression", "Random Forest"),
+  Accuracy = round(c(cm_logit$overall["Accuracy"],  cm_rf$overall["Accuracy"]),  3),
+  Sensitivity = round(c(cm_logit$byClass["Sensitivity"], cm_rf$byClass["Sensitivity"]), 3),
+  Specificity = round(c(cm_logit$byClass["Specificity"], cm_rf$byClass["Specificity"]), 3),
+  Kappa = round(c(cm_logit$overall["Kappa"], cm_rf$overall["Kappa"]),     3)
+)
+kable(
+  comparison_table,
+  row.names = FALSE,
+)
+```
+
+**Interpretation:** The Random Forest achieves much higher accuracy and Kappa than logistic
+regression on the same held-out test set. The key improvements come from the model's ability to capture non-linear
+threshold effects and interactions between predictors (curriculum × distance, n_cars × income). The variable importance plot confirms what our EDA suggested: `dist_home_school`, `curriculum_grp`, and `neigh_group` are the dominant predictors of bus usage.
+
+## Generating Probability Predictions (insert the number of rows in n_rows <- 5 for the full csv)
+
+```{r}
+n_rows <- 5
+# The full dataset still needs imputation and factoring before predicting on it
+df_pred <- df
+for (v in num_vars) {
+  med <- median(df_pred[[v]], na.rm = TRUE)
+  df_pred[[v]] <- ifelse(is.na(df_pred[[v]]), med, df_pred[[v]])
+}
+for (v in cat_vars) {
+  m <- get_mode(df_pred[[v]])
+  df_pred[[v]][is.na(df_pred[[v]])] <- m
+  df_pred[[v]] <- factor(df_pred[[v]], levels = levels(model_data[[v]]))
+}
+
+df_subset <- df_pred[1:n_rows, ]
+subset_probs <- predict(rf_model, newdata = df_subset, type = "prob")[, "yes"]
+submission <- data.frame(
+  id.x = df_subset$id.x,
+  uses_bus = round(subset_probs, 4)
+)
+kable(
+  submission,
+  col.names = c("id.x", "Predicted Probability of Frequent Bus Use")
+)
+```
+
+---
+
+# Part 4: Executive Summary
+
+**Understanding What Drives School Bus Usage Among Abu Dhabi Private School Families**
+
+This analysis examined survey responses from over 4,000 families across Abu Dhabi, Al Ain, and the Al Dhafra region to identify the key factors that predict whether a child uses the school bus four or more days per week. Two predictive models were built and compared. Both consistently pointed to the same set of factors.
+
+**Distance is the most powerful determinant of bus usage.** Families living more than 30 minutes away from school have bus usage rates above 85%, while families within 5 minutes use the bus less than 20% of the time. This finding is intuitive, however very important. The reason for that is daily driving of an hour or more is uncomfortable for working parents, making the school bus the natural solution for families living far away.
+
+**School curriculum and community culture play a major role.** Children at Indian CBSE schools use the bus at much higher rates than children at British, American, or MoE UAE curriculum schools, even after controlling for distance and car ownership. This suggests that bus uptake is shaped not just by logistics, but by community norms, school-organized transport infrastructure, and the geographic clustering of specific school communities in outer suburban areas like Al Wathbah.
+
+**Car ownership and parental mobility reduce bus usage.** Households with three or more cars show much lower bus usage, as do households where the mother holds a UAE driving license. When parents have the means and license to drive, they tend to do so.
+
+**Recommendations for the school association** First, prioritize outreach and improved bus services in neighborhoods close to schools, where bus usage remains low despite infrastructure existing. Second, engage British, American, and MoE UAE curriculum school communities specifically, these groups are underusing the bus compared to their Indian CBSE counterparts. Third, consider flexible options such as one-way transport or custom day subscriptions, which survey respondents cited as the top factors that would encourage them to switch to or continue using the bus. Reducing the all-or-nothing commitment of a full-week bus contract may unlock significant latent demand.
+
+---
